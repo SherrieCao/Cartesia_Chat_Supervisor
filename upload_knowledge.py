@@ -58,12 +58,16 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), val.strip().strip("'\""))
 
 
-_load_dotenv()
-
-BASE_URL = os.getenv("CARTESIA_BASE_URL", "https://api.cartesia.ai").rstrip("/")
-VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01")
-FOLDER_NAME = os.getenv("KB_FOLDER_NAME", "Taniku Izakaya")
-KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "knowledge"))
+# Config placeholders — populated by _configure() inside main(), NOT at import.
+# Importing this module must have zero side effects: the Cartesia deploy build
+# imports the project's source files, so a module that reads required env or
+# calls sys.exit() at import time would break the build.
+BASE_URL = "https://api.cartesia.ai"
+VERSION = "2026-03-01"
+FOLDER_NAME = "Taniku Izakaya"
+KNOWLEDGE_DIR = Path("knowledge")
+API_KEY = ""
+AGENT_ID = ""
 
 
 def die(msg: str) -> NoReturn:
@@ -100,8 +104,16 @@ def get_agent_id() -> str:
         ".cartesia/config.toml")
 
 
-API_KEY = get_api_key()
-AGENT_ID = get_agent_id()
+def _configure() -> None:
+    """Load .env and resolve config. Called from main(), never at import time."""
+    global BASE_URL, VERSION, FOLDER_NAME, KNOWLEDGE_DIR, API_KEY, AGENT_ID
+    _load_dotenv()
+    BASE_URL = os.getenv("CARTESIA_BASE_URL", "https://api.cartesia.ai").rstrip("/")
+    VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01")
+    FOLDER_NAME = os.getenv("KB_FOLDER_NAME", "Taniku Izakaya")
+    KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "knowledge"))
+    API_KEY = get_api_key()
+    AGENT_ID = get_agent_id()
 
 
 def api(method: str, path: str, body: "dict | None" = None) -> dict:
@@ -141,6 +153,7 @@ def find_folder() -> "dict | None":
 
 
 def main() -> None:
+    _configure()
     if not KNOWLEDGE_DIR.is_dir():
         die(f"knowledge dir not found: {KNOWLEDGE_DIR.resolve()}")
     docs = sorted(KNOWLEDGE_DIR.glob("*.md"))
