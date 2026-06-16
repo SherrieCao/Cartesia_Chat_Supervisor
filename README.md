@@ -65,6 +65,17 @@ Two KB paths are wired up:
 The `knowledge/` markdown is generated from `restaurant_data.py` — edit the data there
 (the single source of truth), then regenerate the docs and re-upload them.
 
+Upload the docs to the hosted KB with the included script (idempotent — re-run after
+menu changes; reads your key from the environment so it's never stored):
+
+```bash
+CARTESIA_API_KEY=sk_car_... python upload_knowledge.py
+```
+
+It creates a "Taniku Izakaya" folder, uploads every `knowledge/*.md`, and attaches the
+folder to the agent in `.cartesia/config.toml`. Note this is optional: the local
+`look_up_menu` tool already answers all menu/FAQ questions without it.
+
 ## Configuration
 
 Set keys and the transfer number in `.env` (auto-loaded by the SDK):
