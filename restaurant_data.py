@@ -175,7 +175,8 @@ FACTS: Dict[str, str] = {
     "popular": "Most popular: the Niku ramen (sweet and spicy house favorite) "
                "and the Hojicha Panna Cotta.",
     "reservations": "Reservations are taken by phone. For large parties or "
-                    "private events, callers may be connected to the owner.",
+                    "private events, the host gathers the details and the owner "
+                    "follows up.",
 }
 
 

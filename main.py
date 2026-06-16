@@ -17,7 +17,6 @@ from line.llm_agent import (
     end_call,
     knowledge_base,
     loopback_tool,
-    transfer_call,
     web_search,
 )
 from line.voice_agent_app import AgentEnv, CallRequest, VoiceAgentApp
@@ -35,9 +34,6 @@ CHAT_FALLBACK = "together_ai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
 SUPERVISOR_MODEL = "anthropic/claude-opus-4-8"
 SUPERVISOR_FALLBACK = "together_ai/deepseek-ai/DeepSeek-V3"
 
-# The owner/manager line callers can be transferred to (E.164). Read from .env.
-OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
-
 
 class ChatSupervisorAgent(AgentClass):
     """The phone host for Taniku Izakaya, a Japanese izakaya in San Francisco.
@@ -45,11 +41,11 @@ class ChatSupervisorAgent(AgentClass):
     A two-tier voice agent:
     - A fast, bilingual (English + Japanese) "host" model (Claude Haiku 4.5,
       Qwen3-235B fallback) takes the call, answers questions, looks up the menu,
-      takes reservations, gives wait-time guidance, and transfers callers to the
-      owner's line.
+      takes reservations, and gives wait-time guidance.
     - A "supervisor" model (Claude Opus 4.8, DeepSeek-V3 fallback) is consulted in
       the background for complex inquiries: large-party / private-event logistics,
-      catering, and detailed allergen/dietary reasoning.
+      catering, and detailed allergen/dietary reasoning. This is the only
+      escalation path — the host has no call-transfer tool.
     """
 
     def __init__(
@@ -76,27 +72,17 @@ class ChatSupervisorAgent(AgentClass):
             ),
         )
 
-        # Transfer tool: pin to the owner's line if configured, otherwise fall
-        # back to dynamic mode so construction never fails on a missing number.
-        # (Pinned mode validates the E.164 number at construction time.)
-        if OWNER_PHONE_NUMBER:
-            transfer_tool = transfer_call(
-                target_phone_number=OWNER_PHONE_NUMBER,
-                message="One moment — let me connect you with the restaurant.",
-            )
-        else:
-            transfer_tool = transfer_call
-
         # The host tools. Two knowledge-base paths are wired up:
         #   - look_up_menu: local, works in dev (queries restaurant_data.py)
         #   - knowledge_base: Cartesia-hosted, returns content once menu/FAQ docs
         #     are uploaded to the deployed agent (no-op locally).
+        # There is intentionally no transfer_call: ask_supervisor is the only
+        # escalation path.
         host_tools = [
             self.look_up_menu,
             self.book_reservation,
             self.check_wait_time,
             self.ask_supervisor,
-            transfer_tool,
             web_search,
             end_call(
                 description="End the call only after the caller is finished and "
@@ -299,15 +285,11 @@ You are bilingual. Greet callers in English. If the caller speaks or switches to
 - Directions, parking, nearby transit, or other local logistics you don't know: use web_search.
 - Ending the call: when the caller is done and you've said goodbye, use end_call.
 
-# Hard questions: consult, don't transfer
-For anything complex or where you're unsure — large-party or private-event planning, buyouts, catering, custom/omakase menus, or detailed allergen/dietary questions — use ask_supervisor to get an expert answer, then explain it to the caller in your own words. This is your DEFAULT for difficult questions. ask_supervisor is an internal expert you consult silently; it does NOT connect anyone to a phone. It runs in the background, so acknowledge the caller while you wait ("Let me look into that — one moment"), and never mention that another model or person is involved.
+# Hard questions: consult the expert
+For anything complex or where you're unsure — large-party or private-event planning, buyouts, catering, custom/omakase menus, or detailed allergen/dietary questions — use ask_supervisor to get an expert answer, then explain it to the caller in your own words. Handle difficult questions yourself with the expert's help. ask_supervisor is an internal expert you consult silently; it runs in the background, so acknowledge the caller while you wait ("Let me look into that — one moment"), and never mention that another model is involved.
 
-# Transferring (rare — only to a human)
-transfer_call connects the caller to the restaurant owner's phone — a real person. Use it ONLY when:
-- the caller explicitly asks to speak to the owner, a manager, or a human;
-- there's a complaint that genuinely needs a person; or
-- a firm decision or commitment is required that only the owner can make — final event pricing, holding/booking out the whole space, locking a firm date for a large event — AND you've already gathered the relevant details (and, when useful, consulted ask_supervisor first).
-Do NOT transfer just because a question is hard, unusual, or about an event. Difficult questions are what ask_supervisor is for — answer the caller yourself. Never transfer someone who only wants information.
+# You cannot transfer calls
+You have no way to transfer or forward a call to a person. Do not offer to "put someone through," "connect them," or "transfer" them. If a request truly needs a decision only the owner can make — final event pricing, booking out the whole space, locking a firm date for a large party — take the caller's name and phone number and tell them the owner will follow up. For everything else, answer the caller yourself, using ask_supervisor for the hard parts.
 
 # Reservation flow
 1. Get name, date, time, party size, and callback number — ask for whatever's missing.
@@ -316,7 +298,7 @@ Do NOT transfer just because a question is hard, unusual, or about an event. Dif
 4. Confirm warmly and ask if there's anything else.
 
 # Response style
-Keep it conversational — short sentences, natural phrasing. No emojis, asterisks, or markdown. Everything you say is spoken aloud, so spell things out the way you'd say them (e.g. prices as "twenty-one dollars"). If you don't know something and no tool can find it, say so and offer to connect them to the restaurant."""
+Keep it conversational — short sentences, natural phrasing. No emojis, asterisks, or markdown. Everything you say is spoken aloud, so spell things out the way you'd say them (e.g. prices as "twenty-one dollars"). If you don't know something and no tool can find it, say so honestly and offer to take the caller's name and number so the owner can follow up."""
 
 CHAT_INTRODUCTION = (
     "Thank you for calling Taniku Izakaya, this is Ken! "
@@ -341,7 +323,7 @@ Menu (use real items; flag dietary tags accurately):
 # How to respond
 - Be accurate and practical. Ground suggestions in the real menu above; never invent dishes or prices.
 - Your answer will be spoken aloud, so use natural language, not formatting, and keep it tight.
-- Note key assumptions or limits, and when something truly needs the owner (final pricing, holding the whole space, firm date commitments), say the host should offer to connect the caller to the owner.
+- Note key assumptions or limits, and when something truly needs the owner (final pricing, holding the whole space, firm date commitments), say the host should take the caller's name and number so the owner can follow up (the host cannot transfer calls).
 - For allergen questions, be careful and conservative: identify likely allergens from ingredients, flag uncertainty, and recommend confirming with the kitchen for anything serious."""
 
 

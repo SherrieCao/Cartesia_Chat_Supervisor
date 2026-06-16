@@ -2,8 +2,9 @@
 
 A voice agent that acts as the **phone host for Taniku Izakaya**, a family-owned,
 Asian-owned, authentic Japanese izakaya in San Francisco. It takes inbound calls, answers
-questions, looks up the menu, takes reservations, gives wait-time guidance, and transfers
-callers to the owner's line — **bilingually in English and Japanese**.
+questions, looks up the menu, takes reservations, and gives wait-time guidance —
+**bilingually in English and Japanese**. Complex inquiries are escalated to a background
+"supervisor" model rather than transferred to a person.
 
 Built on Cartesia's [`line`](https://docs.cartesia.ai/line/sdk/overview) SDK, this example
 is intentionally broad: it exercises a wide range of SDK functionality in one coherent app.
@@ -24,12 +25,15 @@ Caller ──► Host (Claude Haiku 4.5)
               ├─ look_up_menu / knowledge_base   (menu, prices, dietary info)
               ├─ check_wait_time                 (tiny space → small groups wait less)
               ├─ book_reservation                (captures + logs a reservation)
-              ├─ transfer_call                   (→ owner's line)
               ├─ web_search                       (parking, transit, "near me")
               ├─ end_call                         (graceful hangup)
               └─ ask_supervisor (background) ──►  Supervisor (Claude Opus 4.8)
                                                   events / catering / allergens
 ```
+
+There is no call-transfer tool: `ask_supervisor` is the only escalation path. For
+requests that genuinely need an owner decision, the host takes the caller's name and
+number for a follow-up.
 
 ## SDK features exercised
 
@@ -39,7 +43,6 @@ Caller ──► Host (Claude Haiku 4.5)
 | Multi-provider models + **cross-provider fallbacks** | Anthropic (Haiku/Opus) → Together (Qwen/DeepSeek) |
 | Background nested-agent tool | `ask_supervisor` (`@loopback_tool(is_background=True)`) |
 | Custom `@loopback_tool`s | `look_up_menu`, `book_reservation`, `check_wait_time` |
-| Built-in `transfer_call` (pinned mode) | transfer to `OWNER_PHONE_NUMBER` |
 | Built-in `end_call` (custom description) | graceful hangup |
 | Built-in `web_search` | local logistics questions |
 | Native `knowledge_base` tool | menu/FAQ lookup when deployed (see below) |
@@ -47,7 +50,8 @@ Caller ──► Host (Claude Haiku 4.5)
 | `http_server_tool` | commented reservation-backend template in `main.py` |
 | Bilingual `introduction` + `system_prompt` | English + Japanese host |
 
-`send_dtmf` and `voicemail` are intentionally omitted — they don't fit an inbound host.
+`transfer_call`, `send_dtmf`, and `voicemail` are intentionally omitted — escalation goes
+to the background supervisor, not to a person.
 
 ## Menu / restaurant data — two knowledge-base paths
 
@@ -78,16 +82,15 @@ folder to the agent in `.cartesia/config.toml`. Note this is optional: the local
 
 ## Configuration
 
-Set keys and the transfer number in `.env` (auto-loaded by the SDK):
+Set keys in `.env` (auto-loaded by the SDK):
 
 ```bash
 ANTHROPIC_API_KEY=...       # primary provider (Claude Haiku/Opus) for both tiers
 TOGETHERAI_API_KEY=...      # required for the Qwen/DeepSeek fallbacks
-OWNER_PHONE_NUMBER=+14155550123   # E.164; the owner's line for transfers
 ```
 
 `[TODO]` placeholders in `restaurant_data.py` (operating hours, street address, full
-dessert menu) and `OWNER_PHONE_NUMBER` should be filled with the real values.
+dessert menu) should be filled with the real values.
 
 ## Running
 
@@ -101,7 +104,7 @@ or your local runner. Try:
 - "What ramen do you have?" / "Do you have anything vegetarian?" / "What's popular?"
 - "I'd like a table for two this Friday at 7:30." (reservation flow)
 - "How long is the wait for a group of six?"
-- "Can you connect me to the owner?"  → transfer
+- "We'd like to book the whole place for 20 people." → consults the background supervisor
 - Switch to Japanese mid-call — the host follows.
 
 ## Example conversations
