@@ -26,6 +26,7 @@ Caller ──► Host (Claude Haiku 4.5, Qwen3-235B fallback)
               ├─ look_up_menu / knowledge_base   menu, prices, dietary info
               ├─ check_wait_time                 tiny space → small groups wait less
               ├─ book_reservation                captures + logs a reservation
+              ├─ transfer_call                   hand off to the owner's line (rare)
               ├─ web_search                       parking, transit, "near me"
               ├─ end_call                         graceful hangup
               └─ ask_supervisor (background) ──►  Supervisor (Claude Opus 4.8,
@@ -33,9 +34,10 @@ Caller ──► Host (Claude Haiku 4.5, Qwen3-235B fallback)
                                                   events / catering / allergens
 ```
 
-There is **no call-transfer tool** — `ask_supervisor` is the only escalation path. For a
-request that genuinely needs an owner decision, the host takes the caller's name and number
-for follow-up.
+Escalation is two-pronged: hard *questions* go to `ask_supervisor` (a background consult,
+the default for anything complex), while `transfer_call` hands the caller to the owner's
+line — used sparingly, only for an explicit request for a person, a complaint, or a firm
+owner-only decision.
 
 ### Files
 
@@ -71,6 +73,7 @@ Everything here is imported directly from the SDK and used as documented.
 | `loopback_tool` | `line.llm_agent` | Decorator for our custom tools; `is_background=True` for `ask_supervisor`. |
 | `end_call` | `line.llm_agent` | Built-in hangup tool (custom description). |
 | `web_search` | `line.llm_agent` | Built-in web search (DuckDuckGo / native). |
+| `transfer_call` | `line.llm_agent` | Built-in; pinned to `OWNER_PHONE_NUMBER` to hand a caller to the owner (used sparingly). |
 | `knowledge_base` | `line.llm_agent` | Built-in tool that queries the agent's hosted documents. |
 | `ToolEnv` | `line.llm_agent` | First param type on every custom tool. |
 | `AgentSendText` | `line.events` | Read supervisor output text in `ask_supervisor`. |
@@ -80,8 +83,7 @@ Everything here is imported directly from the SDK and used as documented.
 | `VoiceAgentApp` | `line.voice_agent_app` | The app object; `app.run()`. |
 | `AgentEnv` / `CallRequest` | `line.voice_agent_app` | Types for the `get_agent` factory. |
 
-**Built-in tools available but intentionally NOT used:** `transfer_call` (removed — we route
-escalation to the supervisor, not a person), `send_dtmf`, `voicemail` (outbound-oriented),
+**Built-in tools available but not used:** `send_dtmf`, `voicemail` (outbound-oriented),
 `agent_as_handoff`, `http_server_tool` (kept only as a commented reservation-backend
 template), `mcp_tool`.
 
@@ -93,7 +95,7 @@ template), `mcp_tool`.
 
 - The agent runtime (`LlmAgent`, `AgentClass`, event loop, `VoiceAgentApp`).
 - Multi-provider model routing via LiteLLM (any `provider/model` string).
-- Built-in tools: `end_call`, `web_search`, `knowledge_base` (query side).
+- Built-in tools: `end_call`, `web_search`, `transfer_call`, `knowledge_base` (query side).
 - Custom-tool decorators (`loopback_tool`, incl. the background variant).
 - Runtime per-call config (`from_call_request` / `CallRequest`).
 - Deployment infra (`cartesia deploy`), env-var management, the Calls API, and TTS/STT.

@@ -31,5 +31,5 @@ No dogs allowed.
 Most popular: the Niku ramen (sweet and spicy house favorite) and the Hojicha Panna Cotta.
 
 ## Reservations
-Reservations are taken by phone. For large parties or private events, the host gathers the details and the owner follows up.
+Reservations are taken by phone. For large parties or private events, callers may be connected to the owner.
 
