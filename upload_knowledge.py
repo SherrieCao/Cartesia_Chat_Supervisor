@@ -12,6 +12,9 @@ creating duplicates, so regenerate knowledge/ and re-run whenever the menu
 changes.
 
 Usage:
+    # with CARTESIA_API_KEY set in .env (auto-loaded):
+    python upload_knowledge.py
+    # or inline:
     CARTESIA_API_KEY=sk_car_... python upload_knowledge.py
 
 Optional env vars:
@@ -30,6 +33,32 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import NoReturn
+
+
+def _load_dotenv() -> None:
+    """Load .env so CARTESIA_API_KEY (and friends) can live there.
+
+    Uses python-dotenv if available (it ships with the SDK); otherwise falls
+    back to a minimal parser. Existing environment variables take precedence.
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+        return
+    except Exception:
+        pass
+    env = Path(".env")
+    if not env.exists():
+        return
+    for line in env.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+
+
+_load_dotenv()
 
 BASE_URL = os.getenv("CARTESIA_BASE_URL", "https://api.cartesia.ai").rstrip("/")
 VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01")
