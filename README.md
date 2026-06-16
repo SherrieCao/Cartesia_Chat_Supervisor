@@ -12,22 +12,22 @@ is intentionally broad: it exercises a wide range of SDK functionality in one co
 
 A two-tier design wrapped in an `AgentClass`:
 
-- **Host** (fast, bilingual): `Qwen3-235B` on Together AI (Japanese-strong), with
-  `Claude Haiku 4.5` as a fallback. Handles the conversation and all the tools.
-- **Supervisor** (deep reasoning, consulted in the background): `DeepSeek-V3` on Together
-  AI, with `Claude Opus 4.8` as a fallback. Repurposed as a restaurant operations/events
+- **Host** (fast, bilingual): `Claude Haiku 4.5`, with `Qwen3-235B` on Together AI
+  (Japanese-strong) as a fallback. Handles the conversation and all the tools.
+- **Supervisor** (deep reasoning, consulted in the background): `Claude Opus 4.8`, with
+  `DeepSeek-V3` on Together AI as a fallback. Repurposed as a restaurant operations/events
   expert for complex inquiries (private events, catering, detailed allergen/dietary
   questions).
 
 ```text
-Caller ──► Host (Qwen3-235B)
+Caller ──► Host (Claude Haiku 4.5)
               ├─ look_up_menu / knowledge_base   (menu, prices, dietary info)
               ├─ check_wait_time                 (tiny space → small groups wait less)
               ├─ book_reservation                (captures + logs a reservation)
               ├─ transfer_call                   (→ owner's line)
               ├─ web_search                       (parking, transit, "near me")
               ├─ end_call                         (graceful hangup)
-              └─ ask_supervisor (background) ──►  Supervisor (DeepSeek-V3)
+              └─ ask_supervisor (background) ──►  Supervisor (Claude Opus 4.8)
                                                   events / catering / allergens
 ```
 
@@ -36,7 +36,7 @@ Caller ──► Host (Qwen3-235B)
 | Feature | Where |
 |---|---|
 | `AgentClass` wrapping multiple `LlmAgent`s | `ChatSupervisorAgent` |
-| Multi-provider models + **cross-provider fallbacks** | Together (Qwen/DeepSeek) → Anthropic (Haiku/Opus) |
+| Multi-provider models + **cross-provider fallbacks** | Anthropic (Haiku/Opus) → Together (Qwen/DeepSeek) |
 | Background nested-agent tool | `ask_supervisor` (`@loopback_tool(is_background=True)`) |
 | Custom `@loopback_tool`s | `look_up_menu`, `book_reservation`, `check_wait_time` |
 | Built-in `transfer_call` (pinned mode) | transfer to `OWNER_PHONE_NUMBER` |
@@ -81,8 +81,8 @@ folder to the agent in `.cartesia/config.toml`. Note this is optional: the local
 Set keys and the transfer number in `.env` (auto-loaded by the SDK):
 
 ```bash
-TOGETHERAI_API_KEY=...      # primary provider (Together AI) for both tiers
-ANTHROPIC_API_KEY=...       # required for the Haiku/Opus fallbacks
+ANTHROPIC_API_KEY=...       # primary provider (Claude Haiku/Opus) for both tiers
+TOGETHERAI_API_KEY=...      # required for the Qwen/DeepSeek fallbacks
 OWNER_PHONE_NUMBER=+14155550123   # E.164; the owner's line for transfers
 ```
 

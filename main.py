@@ -26,13 +26,14 @@ import restaurant_data as rd
 
 logger = logging.getLogger("taniku_izakaya")
 
-# Models (LiteLLM ids). Together AI models need the together_ai/ prefix.
-# Fast host tier: Qwen3-235B is smart and strong in Japanese (this host is bilingual).
-CHAT_MODEL = "together_ai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
-CHAT_FALLBACK = "anthropic/claude-haiku-4-5"
-# Supervisor tier: DeepSeek-V3 for deep reasoning, with Opus 4.8 as fallback.
-SUPERVISOR_MODEL = "together_ai/deepseek-ai/DeepSeek-V3"
-SUPERVISOR_FALLBACK = "anthropic/claude-opus-4-8"
+# Models (LiteLLM ids). Anthropic (Claude) is primary; Together AI (together_ai/
+# prefix) is the cross-provider fallback.
+# Fast host tier: Claude Haiku 4.5, falling back to Qwen3-235B (strong in Japanese).
+CHAT_MODEL = "anthropic/claude-haiku-4-5"
+CHAT_FALLBACK = "together_ai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+# Supervisor tier: Claude Opus 4.8 for deep reasoning, falling back to DeepSeek-V3.
+SUPERVISOR_MODEL = "anthropic/claude-opus-4-8"
+SUPERVISOR_FALLBACK = "together_ai/deepseek-ai/DeepSeek-V3"
 
 # The owner/manager line callers can be transferred to (E.164). Read from .env.
 OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
@@ -42,12 +43,12 @@ class ChatSupervisorAgent(AgentClass):
     """The phone host for Taniku Izakaya, a Japanese izakaya in San Francisco.
 
     A two-tier voice agent:
-    - A fast, bilingual (English + Japanese) "host" model (Qwen3-235B on Together,
-      Haiku 4.5 fallback) takes the call, answers questions, looks up the menu,
+    - A fast, bilingual (English + Japanese) "host" model (Claude Haiku 4.5,
+      Qwen3-235B fallback) takes the call, answers questions, looks up the menu,
       takes reservations, gives wait-time guidance, and transfers callers to the
       owner's line.
-    - A "supervisor" model (DeepSeek-V3, Opus 4.8 fallback) is consulted in the
-      background for complex inquiries: large-party / private-event logistics,
+    - A "supervisor" model (Claude Opus 4.8, DeepSeek-V3 fallback) is consulted in
+      the background for complex inquiries: large-party / private-event logistics,
       catering, and detailed allergen/dietary reasoning.
     """
 
@@ -56,22 +57,22 @@ class ChatSupervisorAgent(AgentClass):
         api_key: Optional[str] = None,
         call_request: Optional[CallRequest] = None,
     ):
-        self._api_key = api_key or os.getenv("TOGETHERAI_API_KEY")
+        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self._current_event: Optional[InputEvent] = None
 
-        # Anthropic fallbacks must carry their own key. LiteLLM reuses the
-        # primary (Together) api_key for plain-string fallbacks, so a string
-        # fallback to an Anthropic model would fail to authenticate. Passing
-        # the fallback as a dict lets LiteLLM override the key per-model.
-        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        # Together AI fallbacks must carry their own key. LiteLLM reuses the
+        # primary (Anthropic) api_key for plain-string fallbacks, so a string
+        # fallback to a Together model would fail to authenticate. Passing the
+        # fallback as a dict lets LiteLLM override the key per-model.
+        together_key = os.getenv("TOGETHERAI_API_KEY")
 
-        # Create the supervisor agent: DeepSeek-V3 on Together, Opus 4.8 fallback.
+        # Create the supervisor agent: Opus 4.8 (Anthropic), DeepSeek-V3 fallback.
         self._supervisor = LlmAgent(
             model=SUPERVISOR_MODEL,
             api_key=self._api_key,
             config=LlmConfig(
                 system_prompt=SUPERVISOR_SYSTEM_PROMPT,
-                fallbacks=[{"model": SUPERVISOR_FALLBACK, "api_key": anthropic_key}],
+                fallbacks=[{"model": SUPERVISOR_FALLBACK, "api_key": together_key}],
             ),
         )
 
@@ -112,16 +113,16 @@ class ChatSupervisorAgent(AgentClass):
                 call_request,
                 fallback_system_prompt=CHAT_SYSTEM_PROMPT,
                 fallback_introduction=CHAT_INTRODUCTION,
-                fallbacks=[{"model": CHAT_FALLBACK, "api_key": anthropic_key}],
+                fallbacks=[{"model": CHAT_FALLBACK, "api_key": together_key}],
             )
         else:
             host_config = LlmConfig(
                 system_prompt=CHAT_SYSTEM_PROMPT,
                 introduction=CHAT_INTRODUCTION,
-                fallbacks=[{"model": CHAT_FALLBACK, "api_key": anthropic_key}],
+                fallbacks=[{"model": CHAT_FALLBACK, "api_key": together_key}],
             )
 
-        # Create the host agent: Qwen3-235B on Together, Haiku 4.5 fallback.
+        # Create the host agent: Haiku 4.5 (Anthropic), Qwen3-235B fallback.
         self._chatter = LlmAgent(
             model=CHAT_MODEL,
             api_key=self._api_key,
