@@ -1,0 +1,19 @@
+# Secrets — never commit (real API keys live here)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Cartesia / Claude local state
+.cartesia/
+.claude/
+
+# OS
+.DS_Store

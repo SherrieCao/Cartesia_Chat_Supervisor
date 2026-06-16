@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Annotated, AsyncIterable, Optional
 
@@ -9,40 +10,123 @@ from line.events import (
     OutputEvent,
     UserTextSent,
 )
-from line.llm_agent import LlmAgent, LlmConfig, ToolEnv, loopback_tool
+from line.llm_agent import (
+    LlmAgent,
+    LlmConfig,
+    ToolEnv,
+    end_call,
+    knowledge_base,
+    loopback_tool,
+    transfer_call,
+    web_search,
+)
 from line.voice_agent_app import AgentEnv, CallRequest, VoiceAgentApp
+
+import restaurant_data as rd
+
+logger = logging.getLogger("taniku_izakaya")
+
+# Models (LiteLLM ids). Together AI models need the together_ai/ prefix.
+# Fast host tier: Qwen3-235B is smart and strong in Japanese (this host is bilingual).
+CHAT_MODEL = "together_ai/Qwen/Qwen3-235B-A22B-Instruct-2507-tput"
+CHAT_FALLBACK = "anthropic/claude-haiku-4-5"
+# Supervisor tier: DeepSeek-V3 for deep reasoning, with Opus 4.8 as fallback.
+SUPERVISOR_MODEL = "together_ai/deepseek-ai/DeepSeek-V3"
+SUPERVISOR_FALLBACK = "anthropic/claude-opus-4-8"
+
+# The owner/manager line callers can be transferred to (E.164). Read from .env.
+OWNER_PHONE_NUMBER = os.getenv("OWNER_PHONE_NUMBER")
 
 
 class ChatSupervisorAgent(AgentClass):
-    """
-    A two-tier agent: a fast "chat" model (Haiku) with access to a powerful "supervisor" (Opus).
+    """The phone host for Taniku Izakaya, a Japanese izakaya in San Francisco.
 
-    The chat model handles routine conversations, but can escalate complex questions
-    to the supervisor. The supervisor receives the full conversation history for context.
+    A two-tier voice agent:
+    - A fast, bilingual (English + Japanese) "host" model (Qwen3-235B on Together,
+      Haiku 4.5 fallback) takes the call, answers questions, looks up the menu,
+      takes reservations, gives wait-time guidance, and transfers callers to the
+      owner's line.
+    - A "supervisor" model (DeepSeek-V3, Opus 4.8 fallback) is consulted in the
+      background for complex inquiries: large-party / private-event logistics,
+      catering, and detailed allergen/dietary reasoning.
     """
 
-    def __init__(self, api_key: Optional[str] = None):
-        self._api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        call_request: Optional[CallRequest] = None,
+    ):
+        self._api_key = api_key or os.getenv("TOGETHERAI_API_KEY")
         self._current_event: Optional[InputEvent] = None
 
-        # Create the supervisor agent (Claude Opus for deep reasoning)
+        # Anthropic fallbacks must carry their own key. LiteLLM reuses the
+        # primary (Together) api_key for plain-string fallbacks, so a string
+        # fallback to an Anthropic model would fail to authenticate. Passing
+        # the fallback as a dict lets LiteLLM override the key per-model.
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+
+        # Create the supervisor agent: DeepSeek-V3 on Together, Opus 4.8 fallback.
         self._supervisor = LlmAgent(
-            model="anthropic/claude-opus-4-5",
+            model=SUPERVISOR_MODEL,
             api_key=self._api_key,
-            config=LlmConfig(system_prompt=SUPERVISOR_SYSTEM_PROMPT),
+            config=LlmConfig(
+                system_prompt=SUPERVISOR_SYSTEM_PROMPT,
+                fallbacks=[{"model": SUPERVISOR_FALLBACK, "api_key": anthropic_key}],
+            ),
         )
 
-        # Create the chat agent (Claude Haiku for fast conversation)
-        self._chatter = LlmAgent(
-            model="anthropic/claude-haiku-4-5",
-            api_key=self._api_key,
-            tools=[
-                self.ask_supervisor,
-            ],
-            config=LlmConfig(
+        # Transfer tool: pin to the owner's line if configured, otherwise fall
+        # back to dynamic mode so construction never fails on a missing number.
+        # (Pinned mode validates the E.164 number at construction time.)
+        if OWNER_PHONE_NUMBER:
+            transfer_tool = transfer_call(
+                target_phone_number=OWNER_PHONE_NUMBER,
+                message="One moment — let me connect you with the restaurant.",
+            )
+        else:
+            transfer_tool = transfer_call
+
+        # The host tools. Two knowledge-base paths are wired up:
+        #   - look_up_menu: local, works in dev (queries restaurant_data.py)
+        #   - knowledge_base: Cartesia-hosted, returns content once menu/FAQ docs
+        #     are uploaded to the deployed agent (no-op locally).
+        host_tools = [
+            self.look_up_menu,
+            self.book_reservation,
+            self.check_wait_time,
+            self.ask_supervisor,
+            transfer_tool,
+            web_search,
+            end_call(
+                description="End the call only after the caller is finished and "
+                "you have said goodbye."
+            ),
+            knowledge_base,
+        ]
+
+        # Build the host config. from_call_request lets a caller override the
+        # system prompt / introduction at call time (multi-tenant / A-B testing);
+        # otherwise our Taniku Izakaya defaults are used.
+        if call_request is not None:
+            host_config = LlmConfig.from_call_request(
+                call_request,
+                fallback_system_prompt=CHAT_SYSTEM_PROMPT,
+                fallback_introduction=CHAT_INTRODUCTION,
+                fallbacks=[{"model": CHAT_FALLBACK, "api_key": anthropic_key}],
+            )
+        else:
+            host_config = LlmConfig(
                 system_prompt=CHAT_SYSTEM_PROMPT,
                 introduction=CHAT_INTRODUCTION,
-            ),
+                fallbacks=[{"model": CHAT_FALLBACK, "api_key": anthropic_key}],
+            )
+
+        # Create the host agent: Qwen3-235B on Together, Haiku 4.5 fallback.
+        self._chatter = LlmAgent(
+            model=CHAT_MODEL,
+            api_key=self._api_key,
+            tools=host_tools,
+            config=host_config,
         )
 
         self._answering_question = False
@@ -59,30 +143,123 @@ class ChatSupervisorAgent(AgentClass):
         async for output in self._chatter.process(env, event):
             yield output
 
+    @loopback_tool
+    async def look_up_menu(
+        self,
+        ctx: ToolEnv,
+        section: Annotated[
+            Optional[str],
+            "A menu section to read in full: zensai, kushiyaki, ramen, toppings, "
+            "donburi, or desserts.",
+        ] = None,
+        query: Annotated[
+            Optional[str],
+            "A keyword to search for, e.g. a dish name, an ingredient, or a "
+            "dietary tag like 'vegetarian', 'spicy', or 'popular'.",
+        ] = None,
+    ) -> str:
+        """Look up Taniku Izakaya's menu — dishes, prices, descriptions, and
+        dietary info. Always use this for menu questions; never guess dish names
+        or prices. Pass a `section` to read a whole part of the menu, or a
+        `query` to search across the menu (e.g. "vegetarian", "ramen", "niku").
+        """
+        if section:
+            return rd.format_menu_section(section)
+        if query:
+            q = query.lower()
+            if "popular" in q or "favorite" in q or "best" in q:
+                return rd.popular_items()
+            return rd.search_menu(query)
+        # No args: give an overview the host can offer to expand.
+        sections = ", ".join(rd.SECTION_TITLES.values())
+        return f"Our menu has these sections: {sections}.\n{rd.FACTS['popular']}"
+
+    @loopback_tool
+    async def book_reservation(
+        self,
+        ctx: ToolEnv,
+        name: Annotated[str, "The caller's name for the reservation"],
+        date: Annotated[str, "Reservation date, e.g. 2026-06-20 or 'this Friday'"],
+        time: Annotated[str, "Reservation time, e.g. '7:30 PM'"],
+        party_size: Annotated[int, "Number of guests"],
+        phone: Annotated[str, "A callback phone number"],
+        notes: Annotated[
+            str, "Any special requests: allergies, occasion, seating preferences"
+        ] = "",
+    ) -> str:
+        """Record a reservation for Taniku Izakaya. Before calling this, collect
+        the name, date, time, party size, and a callback number, and read them
+        back to the caller to confirm. For very large parties or private events,
+        offer to connect them to the owner instead.
+        """
+        # Stub: log the reservation server-side. Swap this for a real backend by
+        # POSTing to your reservation system (see the http_server_tool template
+        # at the bottom of this file).
+        logger.info(
+            "RESERVATION | name=%s | date=%s | time=%s | party=%s | phone=%s | notes=%s",
+            name, date, time, party_size, phone, notes or "-",
+        )
+        return (
+            f"Thanks, {name} — I've noted a reservation for {party_size} on "
+            f"{date} at {time}. We'll call {phone} if anything changes. "
+            "We look forward to seeing you at Taniku Izakaya!"
+        )
+
+    @loopback_tool
+    async def check_wait_time(
+        self,
+        ctx: ToolEnv,
+        party_size: Annotated[int, "Number of guests in the party"],
+    ) -> str:
+        """Give wait-time guidance based on party size. Taniku Izakaya is a tiny,
+        cozy space, so smaller groups are seated sooner and large groups may wait
+        longer. Use this when callers ask about waits or walk-in availability.
+        """
+        if party_size <= 2:
+            return (
+                "We're a small, cozy spot, so parties of one or two usually have "
+                "the shortest wait — often seated fairly quickly, especially "
+                "outside the dinner rush."
+            )
+        if party_size <= 4:
+            return (
+                "For a party of three or four there may be a short wait during "
+                "busy hours, but it usually moves quickly. Coming a bit before or "
+                "after the dinner rush helps."
+            )
+        return (
+            "We're a tiny space, so larger groups can have a longer wait and "
+            "seating isn't guaranteed for walk-ins. For a party this size I'd "
+            "recommend a reservation, and I can connect you with the owner to "
+            "arrange it if you'd like."
+        )
+
     @loopback_tool(is_background=True)
     async def ask_supervisor(
         self,
         ctx: ToolEnv,
-        question: Annotated[str, "The complex question requiring deep reasoning"],
+        question: Annotated[
+            str, "The complex restaurant question requiring careful reasoning"
+        ],
     ) -> AsyncIterable[str]:
-        """
-        Consult with a more powerful reasoning model (Claude Opus) for complex questions.
+        """Consult a more powerful reasoning model for complex inquiries.
 
-        Use this when you encounter:
-        - Complex mathematical problems or proofs
-        - Multi-step logical reasoning puzzles
-        - Questions requiring deep domain expertise
-        - Philosophical or ethical dilemmas
-        - Anything you're genuinely uncertain about
+        Use this for questions that need careful, expert thought:
+        - Large-party or private-event / buyout planning and logistics
+        - Catering or custom multi-course menu requests
+        - Detailed allergen, dietary, or cross-contamination questions
+        - Anything where accuracy matters and you're genuinely uncertain
 
-        The supervisor has access to the full conversation history for context.
+        It runs in the background, so acknowledge the caller while you wait, and
+        never mention that another model is involved. The supervisor has the full
+        conversation history for context.
         """
         if self._answering_question:
             return
         self._answering_question = True
 
         history = self._input_event.history if self._input_event else []
-        yield "Pondering your question deeply, will get back to you shortly"
+        yield "Let me look into that for you — one moment."
 
         # Create a UserTextSent event with the supervisor prompt
         supervisor_event = UserTextSent(content=question, history=history + [UserTextSent(content=question)])
@@ -103,88 +280,100 @@ class ChatSupervisorAgent(AgentClass):
         await self._supervisor.cleanup()
 
 
-CHAT_SYSTEM_PROMPT = """You are a friendly voice assistant that handles most conversations directly, but can consult a more powerful reasoning model for complex questions.
+CHAT_SYSTEM_PROMPT = f"""You are the phone host for Taniku Izakaya, a family-owned, Asian-owned, authentically Japanese izakaya in San Francisco. You answer the restaurant's phone.
 
-# Personality
-Warm, helpful, conversational. Handle routine questions yourself—only escalate when you genuinely need deeper reasoning.
+# Who you are
+Warm, gracious, and efficient — like a great front-of-house host. You make callers feel welcome and get them what they need quickly. The space is small and cozy; the food is authentic Japanese izakaya fare.
 
-# When to use ask_supervisor
-Use for questions requiring careful analysis:
-- Complex math or proofs: "Prove the square root of 2 is irrational"
-- Multi-step logic: "If all A are B, and some B are C, what can we conclude?"
-- Deep domain expertise: advanced physics, legal analysis, medical questions
-- Ethical dilemmas: trolley problems, policy trade-offs
-- Anything where accuracy is critical and you're uncertain
+# Language
+You are bilingual. Greet callers in English. If the caller speaks or switches to Japanese, respond naturally in Japanese and continue in their language. Mirror whichever language the caller uses. Keep Japanese natural and polite (丁寧語).
 
-Handle directly (no supervisor needed):
-- Greetings and small talk
-- Basic facts and common knowledge
-- Simple questions with clear answers
-- Casual conversation
+# Key facts (you may answer these directly)
+{rd.facts_summary()}
 
-# Tools
-## ask_supervisor
-This runs in the background while you continue talking.
+# What you can do, and the tools to use
+- Menu questions (dishes, prices, what's vegetarian/spicy/popular, ingredients): ALWAYS use look_up_menu. Never invent dish names or prices. (knowledge_base is also available when deployed.)
+- Wait times / walk-in availability: use check_wait_time with the party size.
+- Reservations: collect the name, date, time, party size, and a callback number; read them back to confirm; then call book_reservation. For very large parties or private events, offer to connect them to the owner.
+- Connecting to the owner/manager (their request, complaints, press, vendors, anything outside your scope): use transfer_call.
+- Directions, parking, nearby transit, or other local logistics you don't know: use web_search.
+- Complex inquiries — large-party/private-event planning, catering, or detailed allergen/dietary reasoning: use ask_supervisor (runs in the background; acknowledge the caller while you wait, and never mention that another model is involved).
+- Ending the call: when the caller is done and you've said goodbye, use end_call.
 
-When you call it:
-1. Acknowledge immediately: "Let me think carefully about that" or "Give me a moment to work through this"
-2. Wait for the complete response before answering
-3. Never attempt complex questions on your own—defer to the supervisor
-4. Never mention "the supervisor" or "another model" to the caller
-
-If it's taking time: "Still working on this..." or "Almost there..."
-When you get the response: Synthesize it into natural, conversational language.
-Break complex explanations into digestible pieces.
+# Reservation flow
+1. Get name, date, time, party size, and callback number — ask for whatever's missing.
+2. Read the details back to confirm.
+3. Call book_reservation.
+4. Confirm warmly and ask if there's anything else.
 
 # Response style
+Keep it conversational — short sentences, natural phrasing. No emojis, asterisks, or markdown. Everything you say is spoken aloud, so spell things out the way you'd say them (e.g. prices as "twenty-one dollars"). If you don't know something and no tool can find it, say so and offer to connect them to the restaurant."""
 
-Keep it conversational—short sentences, natural phrasing. No emojis, asterisks, or markdown.
-Everything you say will be spoken aloud."""
+CHAT_INTRODUCTION = (
+    "Thank you for calling Taniku Izakaya! お電話ありがとうございます、谷肉居酒屋です。"
+    "How can I help you today?"
+)
 
-CHAT_INTRODUCTION = "Hey! I'm here to help with whatever's on your mind. What would you like to talk about?"
+SUPERVISOR_SYSTEM_PROMPT = f"""You are the operations and events expert for Taniku Izakaya, an authentic Japanese izakaya in San Francisco. The phone host consults you in the background for inquiries that need careful, expert thought, and relays your answer to the caller by voice.
 
-SUPERVISOR_SYSTEM_PROMPT = """You are a deep reasoning assistant providing thorough analysis for complex questions.
+# What you're asked about
+- Large-party and private-event / buyout planning and logistics (the space is small and cozy, with no outdoor seating)
+- Catering and custom multi-course (omakase-style) menu suggestions
+- Detailed allergen, dietary, and cross-contamination questions
+- Anything requiring nuanced judgment about the restaurant
 
-# Your role
+# What you know
+{rd.facts_summary()}
 
-The chat agent handles routine conversation but escalates to you for questions requiring careful thought. You receive the full conversation history for context.
+Menu (use real items; flag dietary tags accurately):
+{rd.full_menu_text()}
 
-# Before responding, consider
-
-- What does the caller already know?
-- What's been discussed so far?
-- What's their level of understanding?
-- Are there constraints or preferences mentioned?
-
-# Response guidelines
-
-Be thorough but voice-friendly. Your response will be synthesized into spoken conversation, so:
-- Use natural language, not heavy formatting
-- Break complex ideas into clear segments
-- Explain technical terms briefly when needed
-- Walk through reasoning step-by-step for math or logic problems
-
-Be accurate and nuanced:
-- Show your reasoning process
-- Note key assumptions or limitations
-- Acknowledge multiple valid perspectives when relevant
-- If the question is ambiguous, address the most likely interpretation
-
-Be practical:
-- Provide step-by-step explanations when helpful
-- Highlight key insights and takeaways
-- Include practical implications when relevant
-
-Focus on being genuinely helpful, not just technically correct."""
+# How to respond
+- Be accurate and practical. Ground suggestions in the real menu above; never invent dishes or prices.
+- Your answer will be spoken aloud, so use natural language, not formatting, and keep it tight.
+- Note key assumptions or limits, and when something truly needs the owner (final pricing, holding the whole space, firm date commitments), say the host should offer to connect the caller to the owner.
+- For allergen questions, be careful and conservative: identify likely allergens from ingredients, flag uncertainty, and recommend confirming with the kitchen for anything serious."""
 
 
 async def get_agent(env: AgentEnv, call_request: CallRequest):
-    """Create a ChatSupervisor agent for this call."""
-    return ChatSupervisorAgent()
+    """Create the Taniku Izakaya host agent for this call.
 
+    `call_request` is threaded through so a caller can override the system prompt
+    or introduction at call time (multi-tenant / A-B testing); otherwise the
+    Taniku Izakaya defaults are used.
+    """
+    return ChatSupervisorAgent(call_request=call_request)
+
+
+# ---------------------------------------------------------------------------
+# Optional: point reservations at a real backend instead of just logging.
+# Uncomment, set RESERVATION_API_URL / RESERVATION_API_KEY in .env, and add
+# `book_reservation_api` to the host's tool list (replacing self.book_reservation).
+# ---------------------------------------------------------------------------
+# from line.llm_agent import http_server_tool
+#
+# book_reservation_api = http_server_tool(
+#     name="book_reservation",
+#     description="Create a reservation at Taniku Izakaya.",
+#     url=os.getenv("RESERVATION_API_URL", "https://example.com/api/reservations"),
+#     method="POST",
+#     request_body_schema={
+#         "type": "object",
+#         "required": ["name", "date", "time", "party_size", "phone"],
+#         "properties": {
+#             "name": {"type": "string", "description": "Caller's name"},
+#             "date": {"type": "string", "description": "Reservation date"},
+#             "time": {"type": "string", "description": "Reservation time"},
+#             "party_size": {"type": "integer", "description": "Number of guests"},
+#             "phone": {"type": "string", "description": "Callback number"},
+#             "notes": {"type": "string", "description": "Special requests"},
+#         },
+#     },
+#     auth={"Authorization": "Bearer ${RESERVATION_API_KEY}"},
+# )
 
 app = VoiceAgentApp(get_agent=get_agent)
 
 if __name__ == "__main__":
-    print("Starting Chat/Supervisor app")
+    print("Starting Taniku Izakaya host")
     app.run()
